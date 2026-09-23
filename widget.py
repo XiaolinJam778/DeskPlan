@@ -1,5 +1,4 @@
 import tkinter as tk
-from tkinter import ttk
 from pathlib import Path
 from datetime import datetime
 import json
@@ -8,25 +7,17 @@ import sys
 
 
 # ============================================================
-# 文件路径
+# DeskPlan Desktop Widget
+# v3 - 壁纸适配版（支持解锁后任意位置拖动 + 位置微调）
 # ============================================================
 
-BASE_DIR = Path(__file__).parent
-DATA_FILE = BASE_DIR / "data" / "deskplan.json"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DATA_FILE = DATA_DIR / "deskplan.json"
+SETTINGS_FILE = DATA_DIR / "widget_settings.json"
 MAIN_FILE = BASE_DIR / "main.py"
 
-
-# ============================================================
-# 星期和课程时间
-# ============================================================
-
-WEEKDAYS = [
-    "周一",
-    "周二",
-    "周三",
-    "周四",
-    "周五"
-]
+WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
 
 PERIODS = [
     ("第1节", "08:00", "08:45"),
@@ -41,38 +32,55 @@ PERIODS = [
     ("第10节", "17:05", "17:50"),
     ("第11节", "18:50", "19:35"),
     ("第12节", "19:40", "20:25"),
-    ("第13节", "20:30", "21:15")
+    ("第13节", "20:30", "21:15"),
 ]
 
+# 与你当前壁纸右侧框内部接近的颜色。
+# 不再使用 -transparentcolor，避免绿色抗锯齿边缘和鼠标事件失效。
+BG_COLOR = "#F0F0F0"
+TEXT_COLOR = "#222222"
+SECONDARY_COLOR = "#666666"
+LIGHT_COLOR = "#929292"
+CURRENT_COLOR = "#111111"
 
-# ============================================================
-# 读取数据
-# ============================================================
+
+def load_json(path, default):
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return default
+
+
+def save_json(path, value):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(value, f, ensure_ascii=False, indent=4)
+    except OSError:
+        pass
+
 
 def load_data():
-
-    if not DATA_FILE.exists():
-        return {
+    return load_json(
+        DATA_FILE,
+        {
             "schedule": {},
-            "memos": []
-        }
+            "memos": [],
+        },
+    )
 
-    try:
 
-        with open(
-            DATA_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
+def time_to_minutes(text):
+    hour, minute = map(int, text.split(":"))
+    return hour * 60 + minute
 
-            return json.load(file)
 
-    except (OSError, json.JSONDecodeError):
-
-        return {
-            "schedule": {},
-            "memos": []
-        }
+def get_today_name():
+    index = datetime.now().weekday()
+    return WEEKDAYS[index] if index < 5 else None
 
 
 # ============================================================
@@ -80,621 +88,426 @@ def load_data():
 # ============================================================
 
 root = tk.Tk()
-
 root.title("DeskPlan Widget")
-
-# 无标题栏
 root.overrideredirect(True)
+root.configure(bg=BG_COLOR)
+root.attributes("-topmost", False)
 
-# 半透明
-root.attributes("-alpha", 0.94)
+screen_width = root.winfo_screenwidth()
+screen_height = root.winfo_screenheight()
 
-# 初始大小与位置
-root.geometry("390x780+40+80")
+# 默认位置：针对你截图中的右侧“杂七杂八”框。
+default_geometry = {
+    "width": max(360, int(screen_width * 0.215)),
+    "height": max(760, int(screen_height * 0.78)),
+    "x": int(screen_width * 0.768),
+    "y": int(screen_height * 0.115),
+    "locked": True,
+    "alpha": 1.0,
+}
 
-# 防止缩放
-root.resizable(False, False)
+settings = load_json(SETTINGS_FILE, default_geometry.copy())
+for key, value in default_geometry.items():
+    settings.setdefault(key, value)
+
+# v3 首次运行时，把旧版本位置轻微下移，适配当前壁纸。
+if int(settings.get("settings_version", 0)) < 3:
+    settings["y"] = int(settings.get("y", default_geometry["y"])) + max(
+        20, int(screen_height * 0.025)
+    )
+    settings["settings_version"] = 3
+
+# 防止换显示器/分辨率后窗口彻底跑出屏幕。
+settings["width"] = min(int(settings["width"]), screen_width)
+settings["height"] = min(int(settings["height"]), screen_height)
+settings["x"] = max(0, min(int(settings["x"]), screen_width - 120))
+settings["y"] = max(0, min(int(settings["y"]), screen_height - 120))
+settings["alpha"] = float(settings.get("alpha", 1.0))
+
+root.geometry(
+    f'{settings["width"]}x{settings["height"]}'
+    f'+{settings["x"]}+{settings["y"]}'
+)
+root.attributes("-alpha", settings["alpha"])
+
+locked = bool(settings.get("locked", True))
+drag_offset_x = 0
+drag_offset_y = 0
 
 
 # ============================================================
-# 状态
+# UI
 # ============================================================
 
-locked = False
+container = tk.Frame(root, bg=BG_COLOR)
+container.pack(fill="both", expand=True)
 
-drag_start_x = 0
-drag_start_y = 0
-
-
-# ============================================================
-# 外层
-# ============================================================
-
-container = tk.Frame(
-    root,
-    bg="#202124",
-    bd=1,
-    relief="solid"
-)
-
-container.pack(
-    fill="both",
-    expand=True
-)
-
-
-# ============================================================
-# 顶部
-# ============================================================
-
-header = tk.Frame(
-    container,
-    bg="#202124",
-    height=70
-)
-
-header.pack(
-    fill="x",
-    padx=15,
-    pady=(12, 5)
-)
-
-
-title_label = tk.Label(
-    header,
-    text="DeskPlan",
-    font=("Microsoft YaHei UI", 18, "bold"),
-    fg="white",
-    bg="#202124"
-)
-
-title_label.pack(
-    anchor="w"
-)
-
+header = tk.Frame(container, bg=BG_COLOR)
+header.pack(fill="x", padx=20, pady=(14, 0))
 
 date_label = tk.Label(
     header,
     text="",
-    font=("Microsoft YaHei UI", 10),
-    fg="#bbbbbb",
-    bg="#202124"
-)
-
-date_label.pack(
+    font=("Microsoft YaHei UI", 15, "bold"),
+    fg=TEXT_COLOR,
+    bg=BG_COLOR,
     anchor="w",
-    pady=(2, 0)
 )
+date_label.pack(anchor="w")
 
+week_label = tk.Label(
+    header,
+    text="",
+    font=("Microsoft YaHei UI", 10),
+    fg=SECONDARY_COLOR,
+    bg=BG_COLOR,
+    anchor="w",
+)
+week_label.pack(anchor="w", pady=(2, 0))
 
-# ============================================================
-# 今日课程标题
-# ============================================================
-
+# 今日课程
 course_title = tk.Label(
     container,
-    text="TODAY",
-    font=("Microsoft YaHei UI", 10, "bold"),
-    fg="#999999",
-    bg="#202124"
-)
-
-course_title.pack(
+    text="TODAY  今日课程",
+    font=("Microsoft YaHei UI", 11, "bold"),
+    fg=TEXT_COLOR,
+    bg=BG_COLOR,
     anchor="w",
-    padx=15,
-    pady=(6, 5)
 )
+course_title.pack(fill="x", padx=20, pady=(24, 8))
 
+course_frame = tk.Frame(container, bg=BG_COLOR)
+course_frame.pack(fill="x", padx=20)
 
-# ============================================================
-# 课程区域
-# ============================================================
+# 给壁纸中部的小猫留白。
+cat_space = tk.Frame(container, bg=BG_COLOR, height=max(140, int(screen_height * 0.16)))
+cat_space.pack(fill="x")
+cat_space.pack_propagate(False)
 
-course_frame = tk.Frame(
-    container,
-    bg="#202124"
-)
-
-course_frame.pack(
-    fill="x",
-    padx=15
-)
-
-
-course_rows = []
-
-
-for index, (period, start, end) in enumerate(PERIODS):
-
-    row = tk.Frame(
-        course_frame,
-        bg="#202124"
-    )
-
-    row.pack(
-        fill="x",
-        pady=2
-    )
-
-
-    time_label = tk.Label(
-        row,
-        text=start,
-        width=6,
-        anchor="w",
-        font=("Microsoft YaHei UI", 9),
-        fg="#aaaaaa",
-        bg="#202124"
-    )
-
-    time_label.pack(
-        side="left"
-    )
-
-
-    period_label = tk.Label(
-        row,
-        text=period,
-        width=7,
-        anchor="w",
-        font=("Microsoft YaHei UI", 9),
-        fg="#777777",
-        bg="#202124"
-    )
-
-    period_label.pack(
-        side="left"
-    )
-
-
-    course_label = tk.Label(
-        row,
-        text="",
-        anchor="w",
-        font=("Microsoft YaHei UI", 10),
-        fg="white",
-        bg="#202124"
-    )
-
-    course_label.pack(
-        side="left",
-        fill="x",
-        expand=True
-    )
-
-
-    course_rows.append(
-        course_label
-    )
-
-
-# ============================================================
-# 分割线
-# ============================================================
-
-separator = tk.Frame(
-    container,
-    height=1,
-    bg="#444444"
-)
-
-separator.pack(
-    fill="x",
-    padx=15,
-    pady=12
-)
-
-
-# ============================================================
-# 备忘录
-# ============================================================
-
+# 待办
 memo_title = tk.Label(
     container,
-    text="TODO",
-    font=("Microsoft YaHei UI", 10, "bold"),
-    fg="#999999",
-    bg="#202124"
-)
-
-memo_title.pack(
+    text="TODO  待办",
+    font=("Microsoft YaHei UI", 11, "bold"),
+    fg=TEXT_COLOR,
+    bg=BG_COLOR,
     anchor="w",
-    padx=15,
-    pady=(0, 5)
 )
+memo_title.pack(fill="x", padx=20, pady=(8, 8))
 
-
-memo_frame = tk.Frame(
-    container,
-    bg="#202124"
-)
-
-memo_frame.pack(
-    fill="both",
-    expand=True,
-    padx=15
-)
-
-
-memo_labels = []
-
-
-# ============================================================
-# 底部状态
-# ============================================================
-
-status_frame = tk.Frame(
-    container,
-    bg="#202124"
-)
-
-status_frame.pack(
-    fill="x",
-    padx=15,
-    pady=(5, 10)
-)
-
+memo_frame = tk.Frame(container, bg=BG_COLOR)
+memo_frame.pack(fill="both", expand=True, padx=20)
 
 status_label = tk.Label(
-    status_frame,
-    text="右键查看更多选项",
+    container,
+    text="",
     font=("Microsoft YaHei UI", 8),
-    fg="#777777",
-    bg="#202124"
+    fg=LIGHT_COLOR,
+    bg=BG_COLOR,
+    anchor="w",
 )
+status_label.pack(fill="x", padx=20, pady=(8, 14))
 
-status_label.pack(
-    side="left"
-)
-
-
-# ============================================================
-# 获取今天星期
-# ============================================================
-
-def get_today():
-
-    weekday_index = datetime.now().weekday()
-
-    if weekday_index < 5:
-        return WEEKDAYS[weekday_index]
-
-    return None
+course_widgets = []
+memo_widgets = []
 
 
-# ============================================================
-# 刷新界面
-# ============================================================
-
-def refresh_widget():
-
-    data = load_data()
-
-    now = datetime.now()
-
-    today = get_today()
+def destroy_widgets(widgets):
+    for widget in widgets:
+        try:
+            widget.destroy()
+        except tk.TclError:
+            pass
+    widgets.clear()
 
 
-    date_label.config(
-        text=now.strftime("%Y年%m月%d日")
-        + (
-            f" · {today}"
-            if today
-            else " · 周末"
-        )
-    )
+def open_editor(event=None):
+    if not MAIN_FILE.exists():
+        status_label.config(text="未找到 main.py")
+        return
+    try:
+        subprocess.Popen([sys.executable, str(MAIN_FILE)], cwd=str(BASE_DIR))
+    except OSError:
+        status_label.config(text="无法打开课表编辑器")
 
 
-    # 清空课程
-    for label in course_rows:
+def refresh_courses(data, today):
+    destroy_widgets(course_widgets)
 
-        label.config(
-            text="—",
-            fg="#666666"
-        )
-
-
-    # 显示今日课程
-    if today:
-
-        day_schedule = (
-            data
-            .get("schedule", {})
-            .get(today, [])
-        )
-
-
-        for index in range(
-            min(
-                len(day_schedule),
-                len(course_rows)
-            )
-        ):
-
-            course_info = day_schedule[index]
-
-            course = course_info.get(
-                "course",
-                ""
-            )
-
-            location = course_info.get(
-                "location",
-                ""
-            )
-
-
-            if course:
-
-                text = course
-
-                if location:
-                    text += f"  ·  {location}"
-
-
-                course_rows[index].config(
-                    text=text,
-                    fg="white"
-                )
-
-
-    # 删除旧备忘显示
-    for label in memo_labels:
-
-        label.destroy()
-
-
-    memo_labels.clear()
-
-
-    memos = data.get(
-        "memos",
-        []
-    )
-
-
-    # 最多显示 5 条
-    for memo in memos[:5]:
-
+    if today is None:
         label = tk.Label(
-            memo_frame,
-            text="□  " + memo,
-            anchor="w",
+            course_frame,
+            text="今天没有课程",
             font=("Microsoft YaHei UI", 10),
-            fg="#dddddd",
-            bg="#202124"
-        )
-
-        label.pack(
-            fill="x",
-            pady=2
-        )
-
-        memo_labels.append(
-            label
-        )
-
-
-    if not memos:
-
-        empty_label = tk.Label(
-            memo_frame,
-            text="暂无备忘",
+            fg=SECONDARY_COLOR,
+            bg=BG_COLOR,
             anchor="w",
-            font=("Microsoft YaHei UI", 9),
-            fg="#666666",
-            bg="#202124"
         )
-
-        empty_label.pack(
-            fill="x"
-        )
-
-        memo_labels.append(
-            empty_label
-        )
-
-
-    # 每 2 秒重新读取一次 JSON
-    root.after(
-        2000,
-        refresh_widget
-    )
-
-
-# ============================================================
-# 窗口拖动
-# ============================================================
-
-def start_drag(event):
-
-    global drag_start_x
-    global drag_start_y
-
-    if locked:
+        label.pack(fill="x", pady=4)
+        course_widgets.append(label)
         return
 
-    drag_start_x = event.x_root - root.winfo_x()
-    drag_start_y = event.y_root - root.winfo_y()
+    schedule = data.get("schedule", {}).get(today, [])
+    now = datetime.now()
+    current_minutes = now.hour * 60 + now.minute
+    has_course = False
+
+    for index, info in enumerate(schedule[: len(PERIODS)]):
+        if not isinstance(info, dict):
+            continue
+
+        course = str(info.get("course", "")).strip()
+        location = str(info.get("location", "")).strip()
+        if not course:
+            continue
+
+        has_course = True
+        period_name, start_time, end_time = PERIODS[index]
+        is_current = (
+            time_to_minutes(start_time)
+            <= current_minutes
+            <= time_to_minutes(end_time)
+        )
+
+        row = tk.Frame(course_frame, bg=BG_COLOR)
+        row.pack(fill="x", pady=4)
+
+        time_label = tk.Label(
+            row,
+            text=start_time,
+            width=6,
+            font=("Microsoft YaHei UI", 9),
+            fg=SECONDARY_COLOR,
+            bg=BG_COLOR,
+            anchor="w",
+        )
+        time_label.pack(side="left")
+
+        marker = "●" if is_current else "○"
+        text = f"{marker}  {course}"
+        if location:
+            text += f" · {location}"
+
+        detail_label = tk.Label(
+            row,
+            text=text,
+            font=("Microsoft YaHei UI", 10, "bold" if is_current else "normal"),
+            fg=CURRENT_COLOR if is_current else TEXT_COLOR,
+            bg=BG_COLOR,
+            anchor="w",
+            justify="left",
+            wraplength=max(240, int(settings["width"]) - 105),
+        )
+        detail_label.pack(side="left", fill="x", expand=True)
+
+        course_widgets.extend([row])
+
+    if not has_course:
+        label = tk.Label(
+            course_frame,
+            text="今天没有课程",
+            font=("Microsoft YaHei UI", 10),
+            fg=SECONDARY_COLOR,
+            bg=BG_COLOR,
+            anchor="w",
+        )
+        label.pack(fill="x", pady=4)
+        course_widgets.append(label)
+
+
+def refresh_memos(data):
+    destroy_widgets(memo_widgets)
+
+    memos = data.get("memos", [])
+    if not isinstance(memos, list):
+        memos = []
+
+    if not memos:
+        label = tk.Label(
+            memo_frame,
+            text="今天没有待办事项",
+            font=("Microsoft YaHei UI", 10),
+            fg=SECONDARY_COLOR,
+            bg=BG_COLOR,
+            anchor="w",
+        )
+        label.pack(fill="x", pady=4)
+        memo_widgets.append(label)
+        return
+
+    for memo in memos[:8]:
+        label = tk.Label(
+            memo_frame,
+            text=f"□  {memo}",
+            font=("Microsoft YaHei UI", 10),
+            fg=TEXT_COLOR,
+            bg=BG_COLOR,
+            anchor="w",
+            justify="left",
+            wraplength=max(240, int(settings["width"]) - 50),
+        )
+        label.pack(fill="x", pady=4)
+        memo_widgets.append(label)
+
+
+def update_status():
+    if locked:
+        status_label.config(text="位置已锁定  ·  右键解锁/微调  ·  双击编辑")
+    else:
+        status_label.config(text="位置未锁定  ·  拖动任意位置移动  ·  右键锁定")
+
+
+def refresh_widget():
+    data = load_data()
+    now = datetime.now()
+    today = get_today_name()
+
+    date_label.config(text=now.strftime("%m月%d日"))
+    week_label.config(text=today if today else "周末")
+
+    refresh_courses(data, today)
+    refresh_memos(data)
+    update_status()
+
+    root.after(2000, refresh_widget)
+
+
+# ============================================================
+# 鼠标交互
+# ============================================================
+
+
+def save_current_settings():
+    settings["x"] = root.winfo_x()
+    settings["y"] = root.winfo_y()
+    settings["width"] = root.winfo_width()
+    settings["height"] = root.winfo_height()
+    settings["locked"] = locked
+    try:
+        settings["alpha"] = float(root.attributes("-alpha"))
+    except (TypeError, ValueError, tk.TclError):
+        settings["alpha"] = 1.0
+    save_json(SETTINGS_FILE, settings)
+
+
+def start_drag(event):
+    global drag_offset_x, drag_offset_y
+    if locked:
+        return
+    drag_offset_x = event.x_root - root.winfo_x()
+    drag_offset_y = event.y_root - root.winfo_y()
 
 
 def drag_window(event):
-
     if locked:
         return
-
-    x = event.x_root - drag_start_x
-    y = event.y_root - drag_start_y
-
-    root.geometry(
-        f"+{x}+{y}"
-    )
+    x = event.x_root - drag_offset_x
+    y = event.y_root - drag_offset_y
+    root.geometry(f"+{x}+{y}")
 
 
-header.bind(
-    "<ButtonPress-1>",
-    start_drag
-)
-
-header.bind(
-    "<B1-Motion>",
-    drag_window
-)
-
-title_label.bind(
-    "<ButtonPress-1>",
-    start_drag
-)
-
-title_label.bind(
-    "<B1-Motion>",
-    drag_window
-)
-
-date_label.bind(
-    "<ButtonPress-1>",
-    start_drag
-)
-
-date_label.bind(
-    "<B1-Motion>",
-    drag_window
-)
+def end_drag(event=None):
+    if not locked:
+        save_current_settings()
 
 
-# ============================================================
-# 打开完整编辑器
-# ============================================================
-
-def open_editor():
-
-    subprocess.Popen(
-        [
-            sys.executable,
-            str(MAIN_FILE)
-        ]
-    )
+def update_drag_cursor():
+    # 解锁时显示移动光标，明确提示当前可以拖动。
+    root.configure(cursor="arrow" if locked else "fleur")
 
 
-# ============================================================
-# 锁定 / 解锁
-# ============================================================
-
-def toggle_lock():
-
-    global locked
-
-    locked = not locked
-
-    if locked:
-
-        status_label.config(
-            text="位置已锁定"
-        )
-
-        menu.entryconfig(
-            0,
-            label="解锁位置"
-        )
-
-    else:
-
-        status_label.config(
-            text="可拖动位置"
-        )
-
-        menu.entryconfig(
-            0,
-            label="锁定位置"
-        )
-
-
-# ============================================================
-# 透明度
-# ============================================================
-
-def set_alpha(value):
-
-    root.attributes(
-        "-alpha",
-        value
-    )
+# 解锁后，整个小组件任意位置都可以拖动。
+# bind_all 也覆盖动态生成的课程和待办标签。
+root.bind_all("<ButtonPress-1>", start_drag, add="+")
+root.bind_all("<B1-Motion>", drag_window, add="+")
+root.bind_all("<ButtonRelease-1>", end_drag, add="+")
 
 
 # ============================================================
 # 右键菜单
 # ============================================================
 
-menu = tk.Menu(
-    root,
-    tearoff=False
-)
+menu = tk.Menu(root, tearoff=False)
 
-menu.add_command(
-    label="锁定位置",
-    command=toggle_lock
-)
 
-menu.add_separator()
+def toggle_lock():
+    global locked
+    locked = not locked
+    save_current_settings()
+    update_status()
+    update_drag_cursor()
+    menu.entryconfig(0, label="解锁并拖动" if locked else "锁定位置")
 
-menu.add_command(
-    label="打开课表编辑器",
-    command=open_editor
-)
 
-menu.add_separator()
+def move_by(dx, dy):
+    x = root.winfo_x() + dx
+    y = root.winfo_y() + dy
 
-menu.add_command(
-    label="透明度 100%",
-    command=lambda: set_alpha(1.0)
-)
+    # 不让窗口完全跑出屏幕。
+    x = max(0, min(x, screen_width - 120))
+    y = max(0, min(y, screen_height - 120))
 
-menu.add_command(
-    label="透明度 90%",
-    command=lambda: set_alpha(0.9)
-)
+    root.geometry(f"+{x}+{y}")
+    save_current_settings()
 
-menu.add_command(
-    label="透明度 80%",
-    command=lambda: set_alpha(0.8)
-)
 
-menu.add_separator()
+def set_alpha(alpha):
+    root.attributes("-alpha", alpha)
+    settings["alpha"] = alpha
+    save_current_settings()
 
-menu.add_command(
-    label="退出 DeskPlan",
-    command=root.destroy
-)
+
+def reset_position():
+    settings.update(default_geometry)
+    settings["settings_version"] = 3
+    root.geometry(
+        f'{default_geometry["width"]}x{default_geometry["height"]}'
+        f'+{default_geometry["x"]}+{default_geometry["y"]}'
+    )
+    save_current_settings()
 
 
 def show_menu(event):
-
-    menu.tk_popup(
-        event.x_root,
-        event.y_root
-    )
-
-
-root.bind_all(
-    "<Button-3>",
-    show_menu
-)
+    try:
+        menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        menu.grab_release()
 
 
-# ============================================================
-# 双击打开编辑器
-# ============================================================
+menu.add_command(label="解锁并拖动" if locked else "锁定位置", command=toggle_lock)
+menu.add_separator()
+menu.add_command(label="打开课表编辑器", command=open_editor)
+menu.add_command(label="立即刷新", command=refresh_widget)
 
-root.bind_all(
-    "<Double-Button-1>",
-    lambda event: open_editor()
-)
+position_menu = tk.Menu(menu, tearoff=False)
+position_menu.add_command(label="上移 10 px", command=lambda: move_by(0, -10))
+position_menu.add_command(label="下移 10 px", command=lambda: move_by(0, 10))
+position_menu.add_command(label="左移 10 px", command=lambda: move_by(-10, 0))
+position_menu.add_command(label="右移 10 px", command=lambda: move_by(10, 0))
+position_menu.add_separator()
+position_menu.add_command(label="恢复默认位置", command=reset_position)
+menu.add_cascade(label="微调位置", menu=position_menu)
+
+menu.add_separator()
+menu.add_command(label="透明度 100%", command=lambda: set_alpha(1.00))
+menu.add_command(label="透明度 96%", command=lambda: set_alpha(0.96))
+menu.add_command(label="透明度 92%", command=lambda: set_alpha(0.92))
+menu.add_separator()
+menu.add_command(label="退出 DeskPlan", command=root.destroy)
+
+# 关键修复：不再使用透明色，因此整个窗口都能收到鼠标事件。
+# bind_all 让动态生成的课程/待办标签也能右键和双击。
+root.bind_all("<Button-3>", show_menu)
+root.bind_all("<Double-Button-1>", open_editor)
 
 
-# ============================================================
-# 启动
-# ============================================================
+def on_close():
+    save_current_settings()
+    root.destroy()
 
+
+root.protocol("WM_DELETE_WINDOW", on_close)
+
+update_drag_cursor()
 refresh_widget()
-
 root.mainloop()
